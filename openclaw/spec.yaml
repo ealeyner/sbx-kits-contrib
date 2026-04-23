@@ -1,0 +1,45 @@
+schemaVersion: "1"
+kind: mixin
+name: openclaw
+displayName: OpenClaw
+description: "Personal AI assistant with multi-platform chat, skills, and gateway support"
+
+network:
+  allowedDomains:
+    - deb.nodesource.com
+    - registry.npmjs.org
+    - "*.telegram.org"
+    - "*.discord.com"
+    - gateway.discord.gg
+    - "*.whatsapp.com"
+    - "*.whatsapp.net"
+    - "*.slack.com"
+    - openclaw.ai
+    - docs.openclaw.ai
+
+environment:
+  variables:
+    ANTHROPIC_BASE_URL: "http://127.0.0.1:54321"
+    ANTHROPIC_API_KEY: proxy-managed
+    OPENCLAW_STATE_DIR: /home/agent/.openclaw
+
+commands:
+  install:
+    - command: "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs"
+      user: "0"
+      description: "Install Node.js 22 (OpenClaw requires >= 22.12.0)"
+    - command: "sudo apt update && sudo apt install -y ssh"
+      user: "1000"
+      description: Install SSH
+    - command: "npm config set proxy $HTTP_PROXY && npm config set https-proxy $HTTP_PROXY && npm install -g --maxsockets=1 --fetch-timeout=600000 openclaw@latest"
+      user: "0"
+      description: Configure npm proxy and install OpenClaw globally
+  startup:
+    - command: ["node", "/home/agent/anthropic-bridge.js"]
+      user: "1000"
+      background: true
+      description: Start Anthropic API bridge for Node.js proxy support
+    - command: ["node", "/usr/local/share/npm-global/bin/openclaw", "gateway", "run", "--allow-unconfigured"]
+      user: "1000"
+      background: true
+      description: Start OpenClaw gateway

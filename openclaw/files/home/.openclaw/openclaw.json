@@ -1,0 +1,13 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-20250514"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "bind": "loopback"
+  }
+}
