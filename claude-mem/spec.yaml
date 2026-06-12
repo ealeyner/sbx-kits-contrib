@@ -1,0 +1,96 @@
+schemaVersion: "1"
+kind: mixin
+name: claude-mem
+extends: claude
+displayName: claude-mem (persistent memory)
+description: "Persistent context across Claude Code sessions: captures session activity into SQLite+FTS5, compresses with the Agent SDK, and injects relevant memory at session start. Pinned to 13.5.5."
+
+network:
+  allowedDomains:
+    # install: npm package, bun + uv installers
+    - registry.npmjs.org
+    - "*.npmjs.org"
+    - "bun.sh:443"
+    - "astral.sh:443"
+    - "github.com:443"
+    - "objects.githubusercontent.com:443"
+    - "release-assets.githubusercontent.com:443"
+    # first-run: chroma-mcp via uvx + its ONNX embedding model
+    - "pypi.org:443"
+    - "files.pythonhosted.org:443"
+    - "chroma-onnx-models.s3.amazonaws.com:443"
+  publishedPorts:
+    - container: 37777
+      name: memory-viewer
+
+environment:
+  variables:
+    # Telemetry off at the source (PostHog is ON by default upstream);
+    # us.i.posthog.com is deliberately not allow-listed.
+    DO_NOT_TRACK: "1"
+    CLAUDE_MEM_TELEMETRY: "0"
+
+commands:
+  install:
+    - command: "npm config set proxy $HTTP_PROXY && npm config set https-proxy $HTTPS_PROXY || true"
+      user: "1000"
+      description: Point npm at the sandbox egress proxy
+    # The installer copies the plugin into ~/.claude/plugins, registers the
+    # marketplace + plugin, runs bun install, and merges enabledPlugins
+    # into ~/.claude/settings.json (creating it if missing).
+    - command: "npx -y claude-mem@13.5.5 install"
+      user: "1000"
+      description: Install claude-mem 13.5.5 (plugin, marketplace registration, bun deps)
+  startup:
+    # Reconcile settings.json: install/startup ordering at create is racy —
+    # whichever of the installer or the platform's seeding wrote the file
+    # first, the other's keys may be missing (the platform only seeds when
+    # the file is absent). This idempotent reconciler ensures both the
+    # platform keys (content SYNCed with the claude kit, driven by
+    # SBX_CRED_ANTHROPIC_MODE) and claude-mem's enabledPlugins entry are
+    # present. Re-runs harmlessly every boot; never overwrites existing
+    # keys. Trace at /tmp/claude-mem-reconcile.log.
+    - command:
+        - sh
+        - -c
+        - |
+          set -e
+          exec > /tmp/claude-mem-reconcile.log 2>&1
+          S=/home/agent/.claude/settings.json
+          mkdir -p /home/agent/.claude
+          # Wait for the platform's own settings write to land first — at
+          # create time the engine seeds this file late in the sequence and
+          # overwrites whatever exists; merging before that loses our key.
+          i=0
+          until grep -q themeId "$S" 2>/dev/null || [ $i -ge 60 ]; do sleep 1; i=$((i+1)); done
+          echo "platform settings present after ${i}s"
+          MODE="${SBX_CRED_ANTHROPIC_MODE:-none}" node -e '
+            const fs = require("fs");
+            const p = process.argv[1];
+            let s = {};
+            try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+            const defaults = {
+              themeId: 1,
+              alwaysThinkingEnabled: true,
+              defaultMode: "bypassPermissions",
+              bypassPermissionsModeAccepted: true,
+            };
+            if (process.env.MODE !== "none") defaults.apiKeyHelper = "echo proxy-managed";
+            for (const k of Object.keys(defaults)) if (!(k in s)) s[k] = defaults[k];
+            s.enabledPlugins = s.enabledPlugins || {};
+            if (!("claude-mem@thedotmack" in s.enabledPlugins)) s.enabledPlugins["claude-mem@thedotmack"] = true;
+            fs.writeFileSync(p, JSON.stringify(s, null, 2));
+            console.log("reconciled");
+          ' "$S"
+      user: "1000"
+      description: Reconcile settings.json — ensure platform keys and claude-mem's enabledPlugins both present (ordering-immune, idempotent)
+
+agentContext: |
+  ## claude-mem
+
+  Persistent memory is active: session activity is captured into a local
+  SQLite database under `~/.claude-mem/` and relevant context is injected
+  at session start. Search past sessions with the mem-search skill or the
+  mcp-search MCP tools. The memory viewer runs on localhost:37777
+  (publish with `sbx ports <sandbox> --publish 37777/tcp` to browse from
+  the host). Telemetry is disabled (DO_NOT_TRACK=1).
