@@ -141,7 +141,34 @@ available.
 3. PR into this repo: commits need DCO sign-off (`git commit -s`) and a
    cryptographic signature (see CONTRIBUTING.md).
 
-## Gotchas hit while building the nanoclaw kit
+## Gotchas hit while converting kits (nanoclaw, openclaw, paperclip, gstack)
+
+- **The sandbox microVM uses 16KB pages on Apple Silicon** (Docker
+  Desktop's VM uses 4KB). Prebuilt arm64 native libs linked for 4KB pages
+  fail at runtime with "ELF load command address/offset not page-aligned"
+  — and amd64 CI can't catch it. Hit by paperclip's `embedded-postgres`;
+  fixed by substituting the distro package (Ubuntu/Debian arm64 builds
+  are page-size agnostic). Smoke-test bundled native binaries inside a
+  real sandbox, not just `docker run`.
+- **Playwright's distro dependency map lags new Ubuntu releases**: on the
+  templates' Ubuntu 26.04, `playwright install --with-deps chromium`
+  refuses. `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-<x64|arm64>`
+  (switch on `TARGETARCH`) makes it proceed with the closest supported
+  dep list.
+- **Startup commands and entrypoints run with a minimal PATH** — npm
+  global bin dirs aren't on it. Symlink baked binaries into
+  `/usr/local/bin` in the Dockerfile.
+- **The sandbox runtime may seed agent config at create time**, clobbering
+  files you baked into the image (it writes its own
+  `~/.openclaw/openclaw.json`, dropping `gateway.mode`). Don't rely on
+  baked config files the runtime also manages — re-assert required keys
+  idempotently in a startup command (`openclaw config set gateway.mode
+  local`).
+- **Loopback-only guardrails vs the port-forwarder**: apps whose
+  zero-auth mode hard-requires a loopback bind (paperclip's
+  `local_trusted`) can't be reached through published ports. Run their
+  authenticated mode (usually the upstream Docker default) and
+  generate/persist the required secret in the entrypoint.
 
 - **`sbx` CLI version skew**: the v2 names and `publishedPorts` need
   sbx ≥ 0.32.0; 0.31.x rejects both at `sbx kit validate` time. Keep
