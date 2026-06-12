@@ -1,0 +1,59 @@
+schemaVersion: "1"
+kind: sandbox
+name: paperclip
+displayName: Paperclip
+description: "Open-source app for managing AI agents at work — Node.js server + React UI orchestrating a team of agents. Uses a pre-baked image so sandboxes start in seconds."
+
+sandbox:
+  # Pre-baked image: Node 22 + paperclipai @ pinned version (server, built
+  # UI, embedded-postgres) on the claude-code template so the claude_local
+  # adapter has Claude Code available. Built by scripts/build-image.sh.
+  image: "docker.io/ealeyner/paperclip-sbx:latest"
+  entrypoint:
+    run: ["/usr/local/bin/paperclip-start"]
+
+network:
+  serviceDomains:
+    api.anthropic.com: anthropic
+    console.anthropic.com: anthropic
+    claude.ai: anthropic
+  serviceAuth:
+    anthropic:
+      headerName: x-api-key
+      valueFormat: "%s"
+  allowedDomains:
+    # runtime plugin / adapter installs
+    - registry.npmjs.org
+    - "*.npmjs.org"
+    # agent workspaces (gh/git ship in the image)
+    - "github.com:443"
+    - "raw.githubusercontent.com:443"
+    - "objects.githubusercontent.com:443"
+    # project domain
+    - "paperclip.ing:443"
+  publishedPorts:
+    - container: 3100
+      name: web
+
+credentials:
+  sources:
+    anthropic:
+      env:
+        - ANTHROPIC_API_KEY
+
+environment:
+  variables:
+    PAPERCLIP_HOME: /home/agent/.paperclip
+    # local_trusted hard-requires a loopback bind, which the sandbox
+    # port-forwarder can't reach — run authenticated (upstream's Docker
+    # default); the entrypoint generates and persists BETTER_AUTH_SECRET.
+    PAPERCLIP_DEPLOYMENT_MODE: authenticated
+    # Bind beyond loopback so the sandbox port-forwarder can reach it.
+    PAPERCLIP_BIND: lan
+    HOST: "0.0.0.0"
+    SERVE_UI: "true"
+    # Opt out of telemetry at the source (telemetry.paperclip.ing is
+    # deliberately not in allowedDomains).
+    PAPERCLIP_TELEMETRY_DISABLED: "1"
+  proxyManaged:
+    - ANTHROPIC_API_KEY
