@@ -63,6 +63,10 @@ environment:
   variables:
     IS_SANDBOX: "1"
     NODE_NO_WARNINGS: "1"
+    # Opt out of nanoclaw's PostHog setup telemetry at the source —
+    # us.i.posthog.com isn't in allowedDomains, and disabling the emitter
+    # also silences the proxy-denial warnings during setup.
+    NANOCLAW_NO_DIAGNOSTICS: "1"
     ONECLI_BIND_HOST: "0.0.0.0"
     ONECLI_URL: "http://127.0.0.1:10254"
     # Use the pre-baked agent image instead of nanoclaw's per-checkout
