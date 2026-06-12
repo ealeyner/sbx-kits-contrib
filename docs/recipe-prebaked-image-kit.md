@@ -1,0 +1,173 @@
+# Recipe: turn an agent into a fast, pre-baked-image sandbox kit
+
+This is the repeatable process used to build the `nanoclaw/` kit (modelled
+on [shelajev/hermes-sbx-kits](https://github.com/shelajev/hermes-sbx-kits)).
+The goal: move every install-time step into a custom Docker image so the
+kit's `spec.yaml` only applies *policy* (network, credentials, ports, env),
+and a fresh sandbox is usable in seconds instead of minutes.
+
+## 0. Understand what the agent needs at runtime
+
+Read the agent's install path end-to-end before writing anything. Catalog:
+
+- **Toolchain**: language runtimes and versions (check `package.json`
+  `engines`/`packageManager`, `.nvmrc`, etc.), build tools, native modules.
+- **Install steps**: what its installer/setup wizard actually does — clone,
+  dependency install, compile, service registration, container builds.
+- **Inner containers**: does the agent spawn containers itself (needs a
+  `*-docker` template base + Docker-in-Docker)? Which images does it build
+  or pull at runtime? Those are your pre-seeding targets.
+- **Network**: every domain touched at runtime (model APIs, package
+  registries, container registries, chat platforms, telemetry). Run it once
+  and check `sbx policy log` for blocked domains you missed.
+- **Ports**: every port it listens on that the host or external services
+  must reach (webhooks, dashboards, gateways).
+- **Escape hatches**: env overrides that let you bypass install-time work
+  (e.g. nanoclaw's `CONTAINER_IMAGE` override and `NANOCLAW_SKIP` step
+  list). These determine how cleanly you can pre-bake.
+
+## 1. Split the work: image vs. kit
+
+| Belongs in the image | Belongs in spec.yaml |
+|---|---|
+| Toolchain upgrades (Node 22, pnpm, …) | `network:` allow/deny lists, `serviceDomains`/`serviceAuth` |
+| Source checkout @ pinned ref + dependency install + build | `credentials:` and `oauth:` policy |
+| CLI binaries the setup wizard would download | `environment.variables` (incl. overrides like `CONTAINER_IMAGE`) |
+| Entrypoint/helper scripts | `network.publishedPorts` |
+| Inner container images (as an embedded `docker save` tar) | tiny idempotent `commands.startup` glue |
+| PATH/profile setup (`/etc/sandbox-persistent.sh`) | — |
+
+Rule of thumb: if it downloads, compiles, or installs, bake it. If it
+configures *this sandbox's* relationship to the host (auth, network,
+ports), it's kit policy. Anything left in `commands:` should be idempotent
+and near-instant.
+
+## 2. Write the Dockerfile
+
+- Base on the `docker/sandbox-templates` image the old kit used
+  (`shell-docker` for plain agents, `claude-code-docker` when the agent
+  shells out to Claude Code, `*-docker` whenever the agent needs
+  Docker-in-Docker). These bases match the sandbox runtime's user model
+  (`agent`, uid 1000, groups `sudo`+`docker`) and proxy/CA machinery —
+  don't build from scratch.
+- Pin everything: upstream repo ref (`ARG NANOCLAW_REF=<commit>`), package
+  manager version, inner-image versions. Unpinned = unreproducible.
+- Do root work (`USER root`) first — toolchain, profile lines — then switch
+  to `USER agent` for the checkout/build so file ownership is right.
+- Bake the entrypoint as a real script under `scripts/` and `COPY` it in,
+  instead of `printf`-escaping it through spec.yaml install commands.
+- End with `USER agent` and a sane `CMD`.
+
+### Pre-seeding inner Docker images
+
+You can't run a Docker daemon during `docker build`, so inner images are
+staged outside and embedded:
+
+1. Build/pull them on the host (`scripts/build-image.sh`).
+2. `docker save` them into one `images/<arch>/images.tar`.
+3. `COPY images/${TARGETARCH}/images.tar /opt/<kit>/images.tar` in the
+   Dockerfile (per-arch staging keeps multi-platform builds honest).
+4. At sandbox startup, an idempotent `load-images.sh` waits for the inner
+   daemon, checks `docker image inspect`, and `docker load`s the tar under
+   a lock (first boot ~30s; later boots no-op).
+
+If the agent derives image names dynamically (nanoclaw uses a per-checkout
+slug), find the env override (`CONTAINER_IMAGE`) and set it in
+`environment.variables` so it uses your pre-loaded tag.
+
+## 3. Write the build script
+
+`scripts/build-image.sh` does, in order: clone upstream @ pinned ref →
+build the inner agent image → pull other inner images → `docker save` all
+of them to `images/<arch>/images.tar` → `docker build` the sandbox image.
+Everything overridable via env (`NANOCLAW_REF`, `IMAGE`, …). Add
+`images/` to `.gitignore` — tars never get committed.
+
+## 4. Write spec.yaml (v2 naming)
+
+```yaml
+schemaVersion: "1"       # stays "1" — the TCK pins it; "2" only switches the OCI distribution format
+kind: sandbox            # v2 rename of kind: agent
+sandbox:                 # v2 rename of the agent: block
+  image: "docker.io/<ns>/<agent>-sbx:latest"
+  entrypoint:
+    run: ["/usr/local/bin/<agent>-start"]
+network:
+  publishedPorts:        # every port the agent needs reachable
+    - container: 3000
+      name: webhook
+```
+
+Carry over the old kit's `serviceDomains`/`serviceAuth`/`oauth`/
+`credentials` blocks unchanged — auth policy is orthogonal to the image
+switch. Trim `allowedDomains` of build-time-only domains (e.g. `nodejs.org`
+once Node is baked), keep runtime ones (registries the agent installs from
+at runtime, chat platforms, telemetry). Replace `commands.install` with at
+most a couple of `commands.startup` entries (socket perms, background
+image-load kick-off).
+
+## 5. Validate and test locally
+
+```console
+$ sbx kit validate ./<kit>/                # CLI-side validation (needs sbx ≥ 0.32 for v2)
+$ go test -v -count=1 ./<kit>/...          # repo TCK (uses spec/ library)
+$ ./<kit>/scripts/build-image.sh           # build the image
+$ docker save <image> -o /tmp/img.tar && sbx template load /tmp/img.tar
+$ sbx create --kit ./<kit> --name <name> <agent> .
+$ sbx ports <name>                          # published ports assigned?
+$ sbx exec <name> -- <smoke checks>         # service up, inner images loaded
+$ sbx run <name>                            # interactive attach
+$ sbx policy log                            # any blocked domains?
+```
+
+`sbx` keeps its own template store separate from Docker Desktop's image
+store — the `docker save | sbx template load` step is what makes a locally
+built image visible to `sbx create`.
+
+Smoke checks worth scripting: service process up, its socket/health
+endpoint responding, `docker images` inside the sandbox showing the
+pre-seeded images, and a real end-to-end message if credentials are
+available.
+
+## 6. Publish
+
+1. `docker push docker.io/<ns>/<agent>-sbx:latest` (multi-arch via a CI
+   matrix that stages a per-arch `images/<arch>/images.tar` before one
+   `buildx` build, or single-arch to start).
+2. Optionally `sbx kit push ./<kit> docker.io/<ns>/sbx-<agent>-kit:latest`
+   to publish the kit itself as an OCI artifact. Stage a clean copy first —
+   `sbx kit push` doesn't honor `.gitignore`, so a leftover `images/` tar
+   would get packaged.
+3. PR into this repo: commits need DCO sign-off (`git commit -s`) and a
+   cryptographic signature (see CONTRIBUTING.md).
+
+## Gotchas hit while building the nanoclaw kit
+
+- **`sbx` CLI version skew**: the v2 names and `publishedPorts` need
+  sbx ≥ 0.32.0; 0.31.x rejects both at `sbx kit validate` time. Keep
+  `schemaVersion: "1"` — the repo TCK pins it, and "2" only opts into the
+  v2 OCI artifact format at distribution time. And as of
+  0.32.0 the runtime validates `publishedPorts` but doesn't auto-bind them
+  at sandbox start — document `sbx ports <sandbox> --publish ...` as the
+  interim path.
+- **`COPY --chmod` applies the file mode to directories it implicitly
+  creates** — a 0644 file mode leaves the parent directory without execute
+  bits, unreadable by everyone. `RUN install -d -m 0755 <dir>` first.
+  Relatedly, `docker save` writes tars 0600, so without `--chmod=0644` the
+  embedded archive is root-only.
+- **Install-state tripwires**: agents that record their installed version
+  (nanoclaw's `data/upgrade-state.json`) refuse to start from a bare baked
+  checkout. Stamp the state at image build time, the same way the agent's
+  sanctioned installer would.
+- **Per-checkout image names**: agents that tag images from a path hash
+  break when you pre-load a fixed tag — always look for the env override.
+- **The setup wizard re-doing baked work**: find the skip mechanism
+  (nanoclaw: `NANOCLAW_SKIP=environment,container,service`) so the wizard
+  only runs the steps that genuinely need the user (auth, channel pairing).
+- **Docker socket perms reset on every boot** — restore them in a startup
+  command, not just install time.
+- **Shallow clones break runtime skills** that fetch other branches; clone
+  full history if the agent self-updates from git.
+- **Proxy env for runtime installs**: baked toolchains still need
+  `npm config set proxy` (or equivalent) at startup since proxy env isn't
+  known at image-build time.
