@@ -1,0 +1,32 @@
+schemaVersion: "1"
+kind: mixin
+name: agent-skills
+extends: claude
+displayName: Agent Skills (addyosmani)
+description: "Production-grade engineering skills for AI coding agents — 24 skills across Define/Plan/Build/Verify/Review/Ship, installed for Claude Code. Skills-only copy: no commands or hooks, so it composes cleanly with other skill packs."
+
+network:
+  allowedDomains:
+    - "github.com:443"
+    - "objects.githubusercontent.com:443"
+    - "release-assets.githubusercontent.com:443"
+
+commands:
+  install:
+    # Skills-only copy from the pinned tag. Deliberately skips the repo's
+    # plugin install path (.claude-plugin / commands / hooks): the slash
+    # commands (/review, /ship, /spec, ...) would collide with other skill
+    # packs, and the hooks need jq. SKILL.md files are self-contained.
+    - command: "set -e; git clone --depth 1 --branch 0.6.2 https://github.com/addyosmani/agent-skills.git /tmp/agent-skills; mkdir -p /home/agent/.claude/skills; cp -R /tmp/agent-skills/skills/* /home/agent/.claude/skills/; rm -rf /tmp/agent-skills"
+      user: "1000"
+      description: Install the 24 agent-skills SKILL.md packs (pinned tag 0.6.2)
+
+agentContext: |
+  ## Agent Skills
+
+  This sandbox has addyosmani/agent-skills installed under
+  `~/.claude/skills` — 24 production-grade engineering skills spanning
+  Define, Plan, Build, Verify, Review, and Ship phases (e.g.
+  idea-refine, code-review-and-quality, performance-optimization).
+  Claude Code discovers them automatically; invoke by describing the
+  task or naming the skill.
