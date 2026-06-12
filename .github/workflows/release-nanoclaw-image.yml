@@ -1,0 +1,85 @@
+name: Release NanoClaw Sandbox Image
+
+# Manual-only: builds the pre-baked nanoclaw sandbox image natively on
+# amd64 and arm64 runners and pushes a multi-arch manifest to Docker Hub.
+# Building on runners avoids uploading multi-GB images from a laptop.
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME  Docker Hub account/namespace to push to
+#   DOCKERHUB_TOKEN     access token with push rights to
+#                       docker.io/<DOCKERHUB_USERNAME>/nanoclaw-sbx
+
+on:
+  workflow_dispatch:
+    inputs:
+      nanoclaw_ref:
+        description: "nanocoai/nanoclaw git ref to bake"
+        required: true
+        default: "36cbf17e107fd0f8daea4ceb2ac523d9f0d88915"
+      onecli_version:
+        description: "OneCLI gateway version (keep in lockstep with nanoclaw's setup/onecli.ts)"
+        required: true
+        default: "1.23.0"
+      tag:
+        description: "image tag to publish"
+        required: true
+        default: "latest"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Free disk space
+        # The build needs ~14GB (base template + agent image + saved tar +
+        # final image); stock runners don't have that to spare.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build sandbox image (${{ matrix.arch }})
+        env:
+          NANOCLAW_REF: ${{ inputs.nanoclaw_ref }}
+          ONECLI_VERSION: ${{ inputs.onecli_version }}
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nanoclaw-sbx:${{ inputs.tag }}-${{ matrix.arch }}
+        run: ./nanoclaw/scripts/build-image.sh
+
+      - name: Push per-arch image
+        run: docker push "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/nanoclaw-sbx:${{ inputs.tag }}-${{ matrix.arch }}"
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        env:
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          docker buildx imagetools create \
+            -t "docker.io/$NS/nanoclaw-sbx:$TAG" \
+            "docker.io/$NS/nanoclaw-sbx:$TAG-amd64" \
+            "docker.io/$NS/nanoclaw-sbx:$TAG-arm64"
+          docker buildx imagetools inspect "docker.io/$NS/nanoclaw-sbx:$TAG"
