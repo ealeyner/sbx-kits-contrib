@@ -58,4 +58,4 @@ commands:
   startup:
     - command: ["sh", "-c", "openclaw config get gateway.mode 2>/dev/null | grep -q local || openclaw config set gateway.mode local; curl -fsS http://127.0.0.1:18789/readyz >/dev/null 2>&1 || setsid sh -c 'openclaw gateway run > /home/agent/.openclaw/gateway.log 2>&1' &"]
       user: "1000"
-      description: Ensure gateway.mode=local (the sandbox runtime seeds its own openclaw.json at create, clobbering the baked config), then start the gateway in the background
+      description: Ensure gateway.mode=local (the kit's files/ config is injected at create over the baked one), then start the gateway in the background
