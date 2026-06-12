@@ -1,0 +1,61 @@
+schemaVersion: "1"
+kind: sandbox
+name: aider
+displayName: Aider
+description: "AI pair programming in your terminal — runs in your workspace git repo, auto-commits edits. Installs in under a minute via uv; no custom image needed."
+
+sandbox:
+  image: "docker/sandbox-templates:shell"
+  entrypoint:
+    run: ["/home/agent/.local/bin/aider"]
+
+network:
+  serviceDomains:
+    api.anthropic.com: anthropic
+    api.openai.com: openai
+  serviceAuth:
+    anthropic:
+      headerName: x-api-key
+      valueFormat: "%s"
+    openai:
+      headerName: Authorization
+      valueFormat: "Bearer %s"
+  allowedDomains:
+    # install-time: uv fetches CPython from astral's GitHub releases and
+    # wheels from PyPI
+    - "pypi.org:443"
+    - "files.pythonhosted.org:443"
+    - "github.com:443"
+    - "objects.githubusercontent.com:443"
+    - "release-assets.githubusercontent.com:443"
+
+credentials:
+  sources:
+    anthropic:
+      env:
+        - ANTHROPIC_API_KEY
+    openai:
+      env:
+        - OPENAI_API_KEY
+
+environment:
+  variables:
+    # Telemetry and update checks off at the source.
+    AIDER_ANALYTICS: "false"
+    AIDER_ANALYTICS_DISABLE: "true"
+    AIDER_CHECK_UPDATE: "false"
+  proxyManaged:
+    - ANTHROPIC_API_KEY
+    - OPENAI_API_KEY
+
+commands:
+  install:
+    # ~1 minute via uv (parallel downloads, prebuilt wheels — no compiler
+    # needed). Light enough that a pre-baked image isn't worth maintaining;
+    # see docs/recipe-prebaked-image-kit.md for when an image IS worth it.
+    - command: "apt-get update -qq && apt-get install -y -qq libportaudio2 || true"
+      user: "0"
+      description: Voice-mode native dependency (best-effort)
+    - command: "uv tool install --python 3.12 aider-chat==0.86.2"
+      user: "1000"
+      description: Install pinned aider via uv (installs CPython 3.12 if needed)
